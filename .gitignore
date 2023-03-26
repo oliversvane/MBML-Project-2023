@@ -130,5 +130,5 @@ dmypy.json
 
 
 # CUSTOM (ADD project specific ignore below)
-
+personal/*
 data/*
