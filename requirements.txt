@@ -1,0 +1,6 @@
+kaggle
+fastparquet
+pathlib
+pandas
+shutil
+seaborn
