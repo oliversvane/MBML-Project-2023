@@ -3,3 +3,5 @@ fastparquet
 pathlib
 pandas
 seaborn
+meteostat
+chart-studio

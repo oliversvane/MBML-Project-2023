@@ -1,127 +1,62 @@
-from torch import Tensor
-import torch
 import pandas as pd
+from meteostat import Point, Daily
+from typing import Optional
 
-
-def generate_square_subsequent_mask(dim1: int, dim2: int) -> Tensor:
-    return torch.triu(torch.ones(dim1, dim2) * float('-inf'), diagonal=1)
-
-def get_indices_input_target(num_obs, input_len, step_size, forecast_horizon, target_len):
-        input_len = round(input_len) # just a precaution
-        start_position = 0
-        stop_position = num_obs-1 # because of 0 indexing
-        
-        subseq_first_idx = start_position
-        subseq_last_idx = start_position + input_len
-        target_first_idx = subseq_last_idx + forecast_horizon
-        target_last_idx = target_first_idx + target_len 
-        print("target_last_idx is {}".format(target_last_idx))
-        print("stop_position is {}".format(stop_position))
-        indices = []
-        while target_last_idx <= stop_position:
-            indices.append((subseq_first_idx, subseq_last_idx, target_first_idx, target_last_idx))
-            subseq_first_idx += step_size
-            subseq_last_idx += step_size
-            target_first_idx = subseq_last_idx + forecast_horizon
-            target_last_idx = target_first_idx + target_len
-
-        return indices
-
-def get_indices_entire_sequence(data: pd.DataFrame, window_size: int, step_size: int) -> list:
-        stop_position = len(data)-1 # 1- because of 0 indexing
-        
-        # Start the first sub-sequence at index position 0
-        subseq_first_idx = 0
-        
-        subseq_last_idx = window_size
-        
-        indices = []
-        
-        while subseq_last_idx <= stop_position:
-
-            indices.append((subseq_first_idx, subseq_last_idx))
-            
-            subseq_first_idx += step_size
-            
-            subseq_last_idx += step_size
-
-        return indices
-
-
-def read_data(data: pd.DataFrame,  
-    timestamp_col_name: str="timestamp") -> pd.DataFrame:
-    data.set_index(timestamp_col_name)
-    data = downcast_data(data)
-    data.sort_values(by=[timestamp_col_name], inplace=True)
-    return data
-
-
-
-
-def downcast_data(df: pd.DataFrame):
+def prep_data(df:pd.DataFrame,ariport_data_path:str, departure_airport:Optional[list]=None) -> pd.DataFrame:
     """
-    Downcast columns in df to smallest possible version of it's existing data
-    type
+    Preprocesses the data to a standart timeseries format dataframe. The function uses external weather data to enrich the data.
+
+    Parameters:
+    --------------
+    df: pd.DataFrame
+        Raw dataframe directly from source
+    airport_data_path: str
+        path to airport data
+    departure_airport: list [Optional]
+        List of sources to include in the resulting airport
+
+
+    Returns:
+    --------------
+    A time series dataframe
     """
-    fcols = df.select_dtypes('float').columns
-    icols = df.select_dtypes('integer').columns
-    df[fcols] = df[fcols].apply(pd.to_numeric, downcast='float')
-    df[icols] = df[icols].apply(pd.to_numeric, downcast='integer')
-    return df
-
-
-
-import os
-import torch
-from torch.utils.data import Dataset
-import pandas as pd
-from typing import Tuple
-
-class TransformerDataset(Dataset):
-    def __init__(self, 
-        data: torch.tensor,
-        indices: list, 
-        enc_seq_len: int, 
-        dec_seq_len: int, 
-        target_seq_len: int
-        ) -> None:
-
-        super().__init__()
-        self.indices = indices
-        self.data = data
-        print("From get_src_trg: data size = {}".format(data.size()))
-        self.enc_seq_len = enc_seq_len
-        self.dec_seq_len = dec_seq_len
-        self.target_seq_len = target_seq_len
-
-    def __len__(self):
-        
-        return len(self.indices)
-
-    def __getitem__(self, index):
-        start_idx = self.indices[index][0]
-        end_idx = self.indices[index][1]
-        sequence = self.data[start_idx:end_idx]
-        src, trg, trg_y = self.get_src_trg(
-            sequence=sequence,
-            enc_seq_len=self.enc_seq_len,
-            dec_seq_len=self.dec_seq_len,
-            target_seq_len=self.target_seq_len
-            )
-
-        return src, trg, trg_y
     
-    def get_src_trg(
-        self,
-        sequence: torch.Tensor, 
-        enc_seq_len: int, 
-        dec_seq_len: int, 
-        target_seq_len: int
-        ) -> Tuple[torch.tensor, torch.tensor, torch.tensor]:
-        assert len(sequence) == enc_seq_len + target_seq_len, "Sequence length does not equal (input length + target length)"
-        src = sequence[:enc_seq_len] 
-        trg = sequence[enc_seq_len:len(sequence)]
-        assert len(trg) == target_seq_len, "Length of trg does not match target sequence length"
-        trg_y = sequence[-target_seq_len:]
-        assert len(trg_y) == target_seq_len, "Length of trg_y does not match target sequence length"
-        return src, trg, trg_y.squeeze(-1)
+    col_list =['FlightDate','Origin','DepDelayMinutes'] # Columns to include in putput
+    
+    if departure_airport != None:
+        df = df[df['Origin'].isin(departure_airport)]
+    else:
+        departure_airport = df['Origin'].unique()
+
+    df = df[col_list]
+
+    df['FlightCount'] = 1
+    df['FlightDate'] = pd.to_datetime(df['FlightDate'])
+    start_date = df['FlightDate'].min()
+    end_date = df['FlightDate'].max()
+
+    #group data
+    df = df.groupby(['FlightDate','Origin']).agg({'DepDelayMinutes': 'mean', 'FlightCount': 'sum'})
+    #add weather data
+    airport_data = pd.read_csv(ariport_data_path)
+    weather_data = pd.DataFrame()
+    for airport in departure_airport:
+        point = airport_data.loc[airport_data['code'] == airport, 'location'].values[0]
+        point_list = point.split("(")[-1].split(")")[0].split(" ")
+        weather_data_ = Daily(Point(float(point_list[1]), float(point_list[0])), start_date, end_date).fetch()
+        weather_data_ = weather_data_.drop(['snow', 'wpgt', 'tsun'], axis=1)
+        weather_data_["Origin"] = airport
+        weather_data_ = weather_data_.reset_index()
+        weather_data_.rename(columns={'time': 'FlightDate'}, inplace=True)
+        weather_data = pd.concat([weather_data, weather_data_], axis=0)
+      
+    df = df.reset_index()
+    df = pd.merge(weather_data, df,on=['FlightDate','Origin'], how='left')
+    df['DepDelayMinutes'].fillna(0)
+    df['FlightCount'].fillna(0)
+    
+
+    df['day_of_week'] = [i.weekday() for i in df.FlightDate]
+    df['is_weekend'] =  [1 if ((i == 5) | (i == 6)) else 0 for i in df['day_of_week']]
+    
+    return df
